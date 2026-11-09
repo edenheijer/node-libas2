@@ -9,7 +9,7 @@ import { createHash, publicEncrypt, createPrivateKey, constants, randomBytes } f
 import { spawnSync } from 'child_process'
 import { describe, test, expect } from 'vitest'
 import MimeNode10 from 'nodemailer/lib/mime-node'
-import { AS2Composer, AS2Parser, AgreementOptions, rsaPkcs1Unwrap } from '../core'
+import { AS2Composer, AS2Parser, AgreementOptions, rsaPkcs1Unwrap, hasNativeImplicitRejection } from '../core'
 
 const data = (name: string) => path.join(__dirname, 'test-data', name)
 const read = (name: string) => fs.readFileSync(data(name), 'utf8')
@@ -110,12 +110,47 @@ describe('RSAES-PKCS1-v1_5 key transport unwrap', () => {
     expect(Buffer.from(rsaPkcs1Unwrap(partnerKey, wrapped, 32))).toEqual(cek)
   })
 
-  test('returns a random key of the expected length instead of throwing on bad padding (RFC 3218)', () => {
+  // Hand-built encoded blocks, RSA-encrypted without padding, to hit each rejection rule.
+  const modulusBytes = partnerKey.asymmetricKeyDetails!.modulusLength! / 8
+  const block = ({ type = 2, padding = modulusBytes - 3 - 32, key = randomBytes(32) } = {}) => {
+    const ps = Buffer.alloc(padding)
+    for (let i = 0; i < ps.length; i++) ps[i] = 1 + (randomBytes(1)[0] % 255) // nonzero
+    const em = Buffer.concat([Buffer.from([0, type]), ps, Buffer.from([0]), key])
+    expect(em.length).toBe(modulusBytes)
+    return { key, wrapped: publicEncrypt({ key: partner.cert, padding: constants.RSA_NO_PADDING }, em) }
+  }
+  const expectRandom = (wrapped: Buffer, keyLength: number, notEqual?: Buffer) => {
+    const a = Buffer.from(rsaPkcs1Unwrap(partnerKey, wrapped, keyLength))
+    const b = Buffer.from(rsaPkcs1Unwrap(partnerKey, wrapped, keyLength))
+    expect(a.length).toBe(keyLength)
+    expect(a.equals(b)).toBe(false) // a fresh random key each time, never an error
+    if (notEqual) expect(a.subarray(0, notEqual.length).equals(notEqual)).toBe(false)
+  }
+
+  test('accepts a hand-built valid block', () => {
+    const { key, wrapped } = block()
+    expect(Buffer.from(rsaPkcs1Unwrap(partnerKey, wrapped, 32))).toEqual(key)
+  })
+
+  test('a well-formed block with the wrong key length yields a random key (RFC 3218)', () => {
     const wrapped = publicEncrypt({ key: partner.cert, padding: constants.RSA_PKCS1_PADDING }, randomBytes(16))
-    const a = Buffer.from(rsaPkcs1Unwrap(partnerKey, wrapped, 32))
-    const b = Buffer.from(rsaPkcs1Unwrap(partnerKey, wrapped, 32))
-    expect(a.length).toBe(32)
-    expect(a.equals(b)).toBe(false)
+    expectRandom(wrapped, 32)
+    const { key, wrapped: longer } = block({ padding: modulusBytes - 3 - 48, key: randomBytes(48) })
+    expectRandom(longer, 32, key.subarray(16))
+  })
+
+  test('a block with the wrong block type yields a random key', () => {
+    const { key, wrapped } = block({ type: 1 })
+    expectRandom(wrapped, 32, key)
+  })
+
+  test('a block with fewer than 8 padding bytes yields a random key', () => {
+    const { key, wrapped } = block({ padding: 7, key: randomBytes(modulusBytes - 3 - 7) })
+    expectRandom(wrapped, key.length, key)
+  })
+
+  test(`native implicit rejection is ${hasNativeImplicitRejection() ? 'available and used' : 'unavailable here, so the constant-time JS path is used'}`, () => {
+    expect(typeof hasNativeImplicitRejection()).toBe('boolean')
   })
 })
 

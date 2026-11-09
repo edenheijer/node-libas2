@@ -1,4 +1,4 @@
-import { randomBytes, createPrivateKey, privateDecrypt, constants, KeyObject } from 'crypto'
+import { randomBytes, createPrivateKey, privateDecrypt, publicEncrypt, generateKeyPairSync, constants, KeyObject } from 'crypto'
 import { PemFile } from './PemFile'
 import { ObjectID } from './LibOid'
 import { AS2Encryption } from './Interfaces'
@@ -6,18 +6,82 @@ import { load, toArrayBuffer } from './Engine'
 
 const RSA_ENCRYPTION = '1.2.840.113549.1.1.1'
 
+let nativeImplicitRejection: boolean | undefined
+
+/** Whether Node's privateDecrypt accepts RSA_PKCS1_PADDING, which it only does when its OpenSSL implements
+ * implicit rejection (OpenSSL 3.2+; Node refuses it otherwise since CVE-2023-46809). Probed once, then cached. */
+export function hasNativeImplicitRejection (): boolean {
+  if (nativeImplicitRejection === undefined) {
+    try {
+      const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 1024 })
+      const probe = Buffer.from('libas2 implicit rejection probe')
+      const wrapped = publicEncrypt({ key: publicKey, padding: constants.RSA_PKCS1_PADDING }, probe)
+      nativeImplicitRejection = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_PADDING }, wrapped).equals(probe)
+    } catch {
+      nativeImplicitRejection = false
+    }
+  }
+
+  return nativeImplicitRejection
+}
+
+/** Branch-free: 1 when x === 0, else 0 (for |x| < 2^31). */
+const isZero = (x: number): number => ((x | -x) >>> 31) ^ 1
+
+/** Copies `candidate` (or zeros past its end) when ok === 1, else `fallback`, without branching on ok. */
+function select (candidate: Uint8Array, fallback: Uint8Array, ok: number, offset = 0): ArrayBuffer {
+  const mask = -ok & 0xff
+  const out = new Uint8Array(fallback.length)
+
+  for (let i = 0; i < out.length; i++) {
+    out[i] = ((candidate[offset + i] | 0) & mask) | (fallback[i] & ~mask)
+  }
+
+  return out.buffer
+}
+
 /**
- * RSAES-PKCS1-v1_5 key transport unwrap (RFC 8017 7.2.2) for CMS. Node's WebCrypto has no RSAES-PKCS1-v1_5 and
- * Node 20.11+/22 on OpenSSL 3.0 refuse privateDecrypt with RSA_PKCS1_PADDING (CVE-2023-46809), so do the raw RSA
- * operation and strip the padding here. A malformed block yields a random key instead of an error, per RFC 3218
- * section 2.3.2, so a failure surfaces only later as an undecryptable payload and gives no padding oracle.
+ * RSAES-PKCS1-v1_5 key transport unwrap (RFC 8017 7.2.2) for CMS content-encryption keys. Node's WebCrypto has no
+ * RSAES-PKCS1-v1_5, so this does not go through pkijs. Any failure (bad padding, wrong key length) yields a random
+ * key of the expected length instead of an error (RFC 3218 2.3.2), so it only surfaces later as an undecryptable
+ * payload.
+ *
+ * - With OpenSSL implicit rejection available (see hasNativeImplicitRejection) Node does the unpadding itself.
+ * - Otherwise the raw RSA result is unpadded here in one full, branch-free pass over the block, so valid and
+ *   invalid blocks take the same path (Bleichenbacher/Marvin timing oracle).
+ * The fallback key is drawn before decrypting and the result is chosen by mask in both cases.
  */
 export function rsaPkcs1Unwrap (privateKey: KeyObject, encryptedKey: Uint8Array, keyLength: number): ArrayBuffer {
-  const em = privateDecrypt({ key: privateKey, padding: constants.RSA_NO_PADDING }, encryptedKey)
-  const separator = em.indexOf(0, 2)
-  const valid = em[0] === 0 && em[1] === 2 && separator >= 10 && em.length - separator - 1 === keyLength
+  const fallback = randomBytes(keyLength)
 
-  return toArrayBuffer(valid ? em.subarray(separator + 1) : randomBytes(keyLength))
+  if (hasNativeImplicitRejection()) {
+    let message: Buffer = Buffer.alloc(0)
+    let decrypted = 1
+    try {
+      message = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_PADDING }, encryptedKey)
+    } catch {
+      decrypted = 0 // not a padding error (those are rejected implicitly) but e.g. a wrong-sized ciphertext
+    }
+    return select(message, fallback, decrypted & isZero(message.length ^ keyLength))
+  }
+
+  const em = privateDecrypt({ key: privateKey, padding: constants.RSA_NO_PADDING }, encryptedKey)
+  const k = em.length
+  let bad = em[0] | (em[1] ^ 2)
+  let separator = 0
+  let found = 0
+
+  for (let i = 2; i < k; i++) {
+    const zero = isZero(em[i])
+    separator |= -(zero & (found ^ 1)) & i // index of the first zero after the 00 02 header
+    found |= zero
+  }
+
+  bad |= found ^ 1
+  bad |= (separator - 10) >>> 31 // at least 8 padding bytes
+  bad |= isZero(isZero((k - separator - 1) ^ keyLength)) // exact key length
+
+  return select(em, fallback, isZero(bad), k - keyLength)
 }
 
 /** CMS EnvelopedData: RSA key transport (RSA-OAEP when encrypting, as pkijs defaults to; RSA-OAEP or
