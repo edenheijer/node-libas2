@@ -18,8 +18,8 @@ import {
   SIGNED_MDN
 } from './Helpers'
 import * as assert from 'assert'
-import { DateTime } from 'luxon'
-import * as nock from 'nock'
+import { syncBuiltinESMExports } from 'module'
+import nock from 'nock'
 
 const options: AS2ComposerOptions = {
   message: {
@@ -121,18 +121,12 @@ describe('AS2Composer', async () => {
     const decryptedContent = decrypted.childNodes[0].content.toString('utf8')
 
     assert.strictEqual(decryptedContent, LIBAS2_EDI)
-  }).timeout(1000)
+  })
 
   it('should make a valid AS2 exchange', async () => {
-    // AS2 testing server is only available between 5:30 AM and 7 PM, Central time.
-    // Main development takes place in time zone America/Chicago.
-    const now = DateTime.utc().setZone('America/Chicago')
-    const startTime = now.set({ hour: 5, minute: 30, second: 0 })
-    const endTime = now.set({ hour: 19, minute: 0, second: 0 })
-    const inServiceHours = now > startTime && now < endTime
-
-    if (!inServiceHours) {
-      // If now is outside the service hours, nock is used to provide a pre-defined mdn.
+    // Fork: always replay the signed MDN recorded from the ArcESB test server (a Drummond certified product)
+    // instead of contacting it live.
+    {
       const [headers, ...body] = SIGNED_MDN.split(
         /(\r\n|\n\r|\n)(\r\n|\n\r|\n)/gu
       )
@@ -140,6 +134,7 @@ describe('AS2Composer', async () => {
       nock('https://as2testing.centralus.cloudapp.azure.com')
         .post('/pub/Receive.rsb')
         .reply(200, body.join('').trimLeft(), parseHeaderString(headers))
+      syncBuiltinESMExports() // fork: let vitest's ESM view of node:https see nock's patch
     }
 
     // Test using ArcESB; this is a Drummond certified product.
@@ -177,5 +172,5 @@ describe('AS2Composer', async () => {
       true,
       'Signed MDN could not be verified.'
     )
-  }).timeout(5000)
+  })
 })

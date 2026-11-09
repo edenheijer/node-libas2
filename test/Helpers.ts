@@ -85,7 +85,8 @@ export async function openssl (options: {
   } catch (error) {
     if (options.printError) process.stdout.write(format(error) + '\n')
     if (options.arguments.verify === true) {
-      return error.message.toLowerCase() === 'verification successful'
+      // OpenSSL 3 says "CMS Verification successful"
+      return error.message.toLowerCase().endsWith('verification successful')
     } else if (options.command === 'req') {
       return error
     }

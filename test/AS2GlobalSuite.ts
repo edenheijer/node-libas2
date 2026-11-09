@@ -1,15 +1,16 @@
-import { ImportMock } from 'ts-mock-imports'
 import { AS2MimeNode, getPackageJson, isMdn, request } from '../core'
 import * as fs from 'fs'
 import * as assert from 'assert'
-import * as nock from 'nock'
+import nock from 'nock'
+import { syncBuiltinESMExports } from 'module'
+import * as os from 'os'
+import * as path from 'path'
 
 describe('Globals for libas2', () => {
   it('should return empty package json', async () => {
-    const mockManager = ImportMock.mockFunction(fs, 'readFileSync')
-    const pkg = getPackageJson()
-
-    mockManager.restore()
+    // Fork: ESM namespaces cannot be stubbed under vitest; start the search where no package.json exists.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libas2-'))
+    const pkg = getPackageJson(path.join(dir, 'a', 'b', 'c', 'd', 'e', 'file.js'))
 
     assert.deepStrictEqual(pkg, {})
   })
@@ -21,6 +22,7 @@ describe('Globals for libas2', () => {
 
     scope.post(uri => uri.startsWith('/fake')).reply(200, payload)
     scope.post(uri => uri.startsWith('/fake')).reply(200, 'payload')
+    syncBuiltinESMExports() // fork: let vitest's ESM view of node:http see nock's patch
 
     const response = await request({
       url: 'http://local.host/fake',

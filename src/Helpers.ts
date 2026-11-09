@@ -143,7 +143,7 @@ export function canonicalTransform (node: AS2MimeNode): void {
 
   if (
     node.getHeader('content-type').slice(0, 5) === 'text/' &&
-    !isNullOrUndefined(node.content)
+    typeof node.content === 'string' // upstream threw on Buffer text content; Buffers are left as-is
   ) {
     node.content = (node.content as string).replace(newline, CRLF)
   }

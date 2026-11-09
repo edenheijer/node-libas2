@@ -1,5 +1,5 @@
 import { Readable } from 'stream'
-import * as MimeNode from 'nodemailer/lib/mime-node'
+import MimeNode from 'nodemailer/lib/mime-node'
 import { AS2MimeNodeOptions, DispositionOutOptions } from './Interfaces'
 import {
   isNullOrUndefined,
@@ -39,27 +39,20 @@ import { hostname } from 'os'
  * @property {boolean} [returnNode]
  */
 
+// nodemailer internals libas2 relies on (kept out of nodemailer's own typings), and narrower types for the rest.
 export interface AS2MimeNode {
-  keepBcc: boolean
   _headers: Array<{
     key: string
     value: string
   }>
-  filename: string
-  date: Date
   boundary: string
-  boundaryPrefix: string
   content: string | Buffer | Readable
   contentType: string
   rootNode: AS2MimeNode
-  parentNode?: AS2MimeNode
+  parentNode: AS2MimeNode | undefined
   childNodes: AS2MimeNode[]
-  nodeCounter: number
   raw: string
-  normalizeHeaderKey: Function
-  _handleContentType(structured: any): void
-  _encodeWords(value: string): string
-  _encodeHeaderValue(key: string, value: string): string
+  getHeader(key: string): string
 }
 
 /** Class for describing and constructing a MIME document.
@@ -271,7 +264,8 @@ export class AS2MimeNode extends MimeNode {
    * @returns {Promise<Buffer>} This instance as raw, complete S/MIME or MIME buffer.
    */
   async build (): Promise<Buffer> {
-    if (this.parsed && this.raw !== undefined) return Buffer.from(this.raw)
+    // raw holds the parsed part's bytes as a latin1 ("binary") string; see AS2Parser.
+    if (this.parsed && this.raw !== undefined) return Buffer.from(this.raw, 'latin1')
 
     if (!isNullOrUndefined(this._sign) && !isNullOrUndefined(this._encrypt)) {
       const signed = await this.sign(this._sign)

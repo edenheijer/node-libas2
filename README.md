@@ -1,4 +1,19 @@
-# libas2
+# libas2 (WG Den Heijer fork)
+
+> **About this fork.** This fork of [ahuggins-nhs/node-libas2](https://github.com/ahuggins-nhs/node-libas2), by Aaron Huggins, is maintained for W.G. den Heijer & Zn. B.V.'s own use. It is **not published to npm** and comes with **no support and no compatibility guarantees**. Releases are tagged here, and the built package is attached to each release as a tarball.
+>
+> It branches from upstream **0.5.7** (commit `08b6835`) and keeps that version's API and the package name `libas2`. Changes:
+> - Dependencies: [pkijs](https://github.com/PeculiarVentures/PKI.js)/asn1js **4** instead of 2, and Node's built-in WebCrypto instead of `@peculiar/webcrypto`. nodemailer **10** replaces 6.x; a test checks that it serializes AS2 MIME byte-for-byte like 6.10.1. The `@nhs-llc/emailjs-mime-parser` dependency is inlined. Requires Node 20+.
+> - Signing works without the `@peculiar/webcrypto` `importKey` monkeypatch that 0.5.7 needed (the key is imported as RSASSA-PKCS1-v1_5).
+> - Inbound PKCS#1 v1.5 key transport (`rsaEncryption`, what most AS2 products send) decrypts on current Node. Node 20.11+/22 on OpenSSL 3.0 refuse `RSA_PKCS1_PADDING` decryption, so the padding is removed in-library with the RFC 3218 random-key countermeasure.
+> - Signatures are verified against the certificate you pass in, not a certificate embedded in the message under the same issuer and serial.
+> - Signed MDNs and CRLF-terminated 7bit parts are signed over the RFC 1847 byte range. 0.5.7's signed MDNs failed OpenSSL and 0.5.7's own verifier; MDNs and messages signed by 0.5.7 still verify here. Outgoing MDNs say `micalg=<algorithm>` instead of `micalg=undefined`.
+> - The parser keeps every byte, so `Content-Transfer-Encoding: binary` and non-ASCII signed parts no longer get corrupted by a UTF-8 round trip.
+> - Build with `tsc`, test with vitest: upstream's suites still pass, and `test/fork.test.ts` adds OpenSSL interop and live interop against the original `libas2@0.5.7`.
+>
+> The original README follows.
+
+## libas2
 
 A pure Javascript/Typescript implementation of the AS2 protocol. This project assumes that it fully implements Applicability Statement 2 (AS2) version 1.0 per RFC 4130. Best effort has been made to achieve tests which cover the different aspects of the RFC, but **this is not a certified library**. The project does not have access to Drummond certification, which is considered to be the standards body in certifying compatibility with AS2, so good sense should be used when using this library as the AS2 layer in an application.
 

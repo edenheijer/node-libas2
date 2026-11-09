@@ -275,7 +275,9 @@ export class AS2Disposition {
     ) {
       mdnMime = await mdnMime.sign({
         cert: options.agreement.host.certificate,
-        key: options.agreement.host.privateKey
+        key: options.agreement.host.privateKey,
+        // 0.5.7 omitted this and sent "micalg=undefined" (fixed upstream in 0.8.2).
+        algorithm: options.agreement.partner.mdn.signing
       })
     }
 

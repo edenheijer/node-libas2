@@ -1,7 +1,8 @@
 import { AS2Constants } from '../Constants'
 import { AS2MimeNode } from '../AS2MimeNode'
 import { getEncryptionOptions, canonicalTransform } from '../Helpers'
-import * as MimeNode from 'nodemailer/lib/mime-node'
+import MimeNode from 'nodemailer/lib/mime-node'
+import { PassThrough } from 'stream'
 import {
   EncryptionOptions,
   SigningOptions,
@@ -52,7 +53,16 @@ export class AS2Crypto {
   private static async buildNode (node: AS2MimeNode): Promise<Buffer> {
     return node.parsed
       ? await node.build()
-      : await MimeNode.prototype.build.bind(node)()
+      : await (MimeNode.prototype.build as () => Promise<Buffer>).call(node)
+  }
+
+  /** The node exactly as nodemailer streams it inside its parent (build() adds a final CRLF when missing). */
+  private static async streamNode (node: AS2MimeNode): Promise<Buffer> {
+    const out = new PassThrough()
+    const chunks: Buffer[] = []
+    out.on('data', (chunk: Buffer) => chunks.push(chunk))
+    await new Promise<void>((resolve, reject) => node.stream(out, {}, error => (error ? reject(error) : resolve())))
+    return Buffer.concat(chunks)
   }
 
   /** A fix for signing with Nodemailer to produce verifiable SMIME;
@@ -157,21 +167,23 @@ export class AS2Crypto {
       }
   > {
     const contentPart = await AS2Crypto.buildNode(node.childNodes[0])
-    const contentPartNoCrLf = AS2Crypto.removeTrailingCrLf(contentPart)
     const signaturePart = Buffer.isBuffer(node.childNodes[1].content)
       ? node.childNodes[1].content
       : Buffer.from(node.childNodes[1].content as string, 'base64')
-    const signedData = new AS2SignedData(contentPart, signaturePart)
+    // A parsed part's raw bytes end with the CRLF that belongs to the next boundary delimiter; the signed
+    // content (RFC 1847) is everything before it. Try upstream's order (raw, then without that CRLF) plus one
+    // more CRLF stripped, which is how libas2 <= 0.5.7 signed MDNs and CRLF-terminated text parts.
+    const standard = AS2Crypto.removeTrailingCrLf(contentPart)
 
-    // Deal with Nodemailer trailing CRLF bug by trying with and without CRLF
-    if (await signedData.verify(options.cert)) {
-      return getDigest ? signedData.getMessageDigest() : true
+    for (const candidate of new Set([contentPart, standard, AS2Crypto.removeTrailingCrLf(standard)])) {
+      const signedData = new AS2SignedData(candidate, signaturePart)
+
+      if (await signedData.verify(options.cert)) {
+        return getDigest ? signedData.getMessageDigest() : true
+      }
     }
 
-    const signedDataNoCrLf = new AS2SignedData(contentPartNoCrLf, signaturePart)
-    const result = await signedDataNoCrLf.verify(options.cert)
-
-    return getDigest && result ? signedDataNoCrLf.getMessageDigest() : result
+    return false
   }
 
   /** Method to sign data against a certificate and key pair.
@@ -206,9 +218,10 @@ export class AS2Crypto {
 
     canonicalTransform(contentNode)
 
-    const canonical = AS2Crypto.removeTrailingCrLf(
-      await AS2Crypto.buildNode(contentNode)
-    )
+    // Sign exactly the bytes the parent writes before its CRLF + "--boundary" delimiter. Upstream took build()
+    // and stripped one CRLF: identical for base64 parts, but for parts that already end in CRLF (signed MDNs,
+    // 7bit text) it signed one CRLF too few, which OpenSSL and other RFC 1847 verifiers reject.
+    const canonical = await AS2Crypto.streamNode(contentNode)
 
     const signedData = new AS2SignedData(canonical)
     const derBuffer = await signedData.sign({

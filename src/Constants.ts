@@ -6,7 +6,7 @@ export const getPackageJson = function getPackageJson (
   filename?: string,
   index: number = 0
 ): any {
-  filename = filename === undefined ? module.filename : filename
+  filename = filename === undefined ? __filename : filename
   let pkg
 
   try {
